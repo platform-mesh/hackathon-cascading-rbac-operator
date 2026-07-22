@@ -1,0 +1,24 @@
+# Default skip paths
+external/bazel_tools
+.git
+node_modules
+_output
+third_party
+vendor
+verify/boilerplate/test
+verify_boilerplate.py
+
+# External tools and scripts
+hack/uget.sh
+
+# Examples
+operators/resource-broker/examples
+
+# Auto-generated files
+services/iam-service/pkg/graph/generated.go
+services/iam-service/pkg/graph/models_gen.go
+services/iam-service/pkg/keycloak/client/client.go
+services/iam-service/pkg/resolver/schema.resolvers.go
+
+services/kubernetes-graphql-gateway/sdk/schemahandler.pb.go
+services/kubernetes-graphql-gateway/sdk/schemahandler_grpc.pb.go
