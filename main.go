@@ -20,11 +20,15 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -35,6 +39,7 @@ import (
 	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
 	mcreconcile "sigs.k8s.io/multicluster-runtime/pkg/reconcile"
 
+	"github.com/kcp-dev/logicalcluster/v3"
 	apisv1alpha1 "github.com/kcp-dev/sdk/apis/apis/v1alpha1"
 	tenancyv1alpha1 "github.com/kcp-dev/sdk/apis/tenancy/v1alpha1"
 
@@ -85,7 +90,7 @@ func run() error {
 	if err := mcbuilder.ControllerManagedBy(mgr).
 		Named("kcp-workspace-controller").
 		For(&tenancyv1alpha1.Workspace{}).
-		Complete(mcreconcile.Func(reconcileWorkspace(mgr))); err != nil {
+		Complete(mcreconcile.Func(reconcileWorkspace(mgr, cfg))); err != nil {
 		return fmt.Errorf("failed to build controller: %w", err)
 	}
 
@@ -97,7 +102,7 @@ func run() error {
 	return nil
 }
 
-func reconcileWorkspace(mgr mcmanager.Manager) mcreconcile.Func {
+func reconcileWorkspace(mgr mcmanager.Manager, adminCfg *rest.Config) mcreconcile.Func {
 	return func(ctx context.Context, req mcreconcile.Request) (ctrl.Result, error) {
 		log := log.FromContext(ctx).WithValues("cluster", req.ClusterName, "name", req.Name)
 
@@ -116,11 +121,42 @@ func reconcileWorkspace(mgr mcmanager.Manager) mcreconcile.Func {
 		}
 
 		if !ws.DeletionTimestamp.IsZero() {
-			log.Info("Workspace deleting")
+			log.Info("Workspace deleting", "workspace", ws.Name)
 			return reconcile.Result{}, nil
 		}
 
-		log.Info("Workspace present", "phase", ws.Status.Phase)
+		log.Info("Workspace present", "workspace", ws.Name, "phase", ws.Status.Phase)
+
+		// The workspace's own logical cluster is stored in Spec.Cluster. It is
+		// only set once the workspace has been scheduled onto a shard.
+		if ws.Spec.Cluster == "" {
+			log.Info("Workspace not scheduled yet, no logical cluster", "workspace", ws.Name)
+			return reconcile.Result{}, nil
+		}
+
+		// trim out any cluster path from admin config
+		clusterCfg := rest.CopyConfig(adminCfg)
+		if idx := strings.Index(clusterCfg.Host, "/clusters/"); idx != -1 {
+			clusterCfg.Host = clusterCfg.Host[:idx]
+		}
+		clusterCfg.Host += logicalcluster.NewPath(ws.Spec.Cluster).RequestPath()
+
+		clusterClient, err := client.New(clusterCfg, client.Options{Scheme: scheme.Scheme})
+		if err != nil {
+			return reconcile.Result{}, fmt.Errorf("failed to create client for logical cluster %q: %w", ws.Spec.Cluster, err)
+		}
+
+		// TODO super simple example to show that the client works
+		cms := &corev1.ConfigMapList{}
+		if err := clusterClient.List(ctx, cms); err != nil {
+			return reconcile.Result{}, fmt.Errorf("failed to list configmaps in logical cluster %q: %w", ws.Spec.Cluster, err)
+		}
+		names := make([]string, 0, len(cms.Items))
+		for _, cm := range cms.Items {
+			names = append(names, cm.Namespace+"/"+cm.Name)
+		}
+		log.Info("Listed configmaps in workspace's logical cluster", "workspace", ws.Name, "logicalCluster", ws.Spec.Cluster, "configmaps", names)
+
 		return reconcile.Result{}, nil
 	}
 }
