@@ -1,23 +1,36 @@
+# Copyright The Platform Mesh Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 ---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
-  name: cascadeobjects.cascade.platform-mesh.io
+  name: cascades.fleet.platform-mesh.io
 spec:
-  group: cascade.platform-mesh.io
+  group: fleet.platform-mesh.io
   names:
-    kind: CascadeObject
-    listKind: CascadeObjectList
-    plural: cascadeobjects
-    singular: cascadeobject
+    kind: Cascade
+    listKind: CascadeList
+    plural: cascades
+    singular: cascade
   scope: Cluster
   versions:
   - name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: CascadeObject allows for defining cascading behavior for Kubernetes
+        description: Cascade allows for defining cascading behavior for Kubernetes
           resources.
         properties:
           apiVersion:
@@ -38,21 +51,20 @@ spec:
           metadata:
             type: object
           spec:
-            description: CascadeObjectSpec defines the desired state of CascadeObject.
+            description: CascadeSpec defines the desired state of Cascade.
             properties:
-              gvr:
-                description: GVR defines the GroupVersionResource of the resource
-                  to cascade.
+              gvk:
+                description: GVK defines the GroupVersionKind of the resource to cascade.
                 properties:
                   group:
                     type: string
-                  resource:
+                  kind:
                     type: string
                   version:
                     type: string
                 required:
                 - group
-                - resource
+                - kind
                 - version
                 type: object
               maxDepth:
@@ -68,10 +80,11 @@ spec:
                 description: Namespace defines the namespace of the resource to cascade.
                 type: string
             required:
-            - gvr
+            - gvk
+            - name
             type: object
           status:
-            description: CascadeObjectStatus defines the observed state of CascadeObject.
+            description: CascadeStatus defines the observed state of Cascade.
             properties:
               conditions:
                 description: Conditions represent the latest available observations
