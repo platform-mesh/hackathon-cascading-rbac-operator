@@ -51,3 +51,4 @@ cat ~/.kube/cache/oidc-login/<tokenfile> | jq
 
 # You can now decode it using b64 --decode or an online decoder like jwt.io
 cat ~/.kube/cache/oidc-login/<tokenfile> | jq -r '.id_token | split(".")[1] | @base64d' | jq
+```
