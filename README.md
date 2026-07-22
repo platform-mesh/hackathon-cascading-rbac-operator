@@ -17,10 +17,10 @@ go run main.go
 
 ```sh
 # Generate DeepCopy
-go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.21.0 object:headerFile=./hack/boilerplate/boilerplate.go.txt paths=./apis/cascade/v1alpha1
+go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.21.0 object:headerFile=./hack/boilerplate/boilerplate.go.txt paths=./apis/fleet/v1alpha1
 
 # Generate CRDs
-go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.21.0 crd:headerFile=./hack/boilerplate/boilerplate.yaml.txt paths=./apis/cascade/... output:crd:artifacts:config=config/crd/bases
+go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.21.0 crd:headerFile=./hack/boilerplate/boilerplate.yaml.txt paths=./apis/fleet/... output:crd:artifacts:config=config/crd/bases
 
 # Generate ARS
 go run github.com/kcp-dev/sdk/cmd/apigen@v0.32.3 --input-dir ./config/crd/bases --output-dir ./config/resources --header-file ./hack/boilerplate/boilerplate.yaml.txt
