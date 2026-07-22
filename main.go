@@ -21,13 +21,10 @@ import (
 	"fmt"
 	"os"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/event"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -35,7 +32,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	mcbuilder "sigs.k8s.io/multicluster-runtime/pkg/builder"
-	mchandler "sigs.k8s.io/multicluster-runtime/pkg/handler"
 	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
 	mcreconcile "sigs.k8s.io/multicluster-runtime/pkg/reconcile"
 
@@ -85,12 +81,8 @@ func run() error {
 
 	if err := mcbuilder.ControllerManagedBy(mgr).
 		Named("kcp-workspace-controller").
-		Watches(&tenancyv1alpha1.Workspace{}, workspaceEventHandler()).
-		Complete(mcreconcile.Func(
-			func(ctx context.Context, req mcreconcile.Request) (ctrl.Result, error) {
-				return reconcile.Result{}, nil
-			},
-		)); err != nil {
+		For(&tenancyv1alpha1.Workspace{}).
+		Complete(mcreconcile.Func(reconcileWorkspace(mgr))); err != nil {
 		return fmt.Errorf("failed to build controller: %w", err)
 	}
 
@@ -102,20 +94,30 @@ func run() error {
 	return nil
 }
 
-// workspaceEventHandler returns a multicluster event handler that natively
-// distinguishes create, update and delete events for Workspaces and logs a
-// line for each.
-func workspaceEventHandler() mchandler.TypedEventHandlerFunc[client.Object, mcreconcile.Request] {
-	l := log.Log.WithName("kcp-workspace-controller")
-	return mchandler.Lift(handler.Funcs{
-		CreateFunc: func(ctx context.Context, evt event.CreateEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
-			l.Info("Workspace created", "name", evt.Object.GetName())
-		},
-		UpdateFunc: func(ctx context.Context, evt event.UpdateEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
-			l.Info("Workspace updated", "name", evt.ObjectNew.GetName())
-		},
-		DeleteFunc: func(ctx context.Context, evt event.DeleteEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
-			l.Info("Workspace deleted", "name", evt.Object.GetName())
-		},
-	})
+func reconcileWorkspace(mgr mcmanager.Manager) mcreconcile.Func {
+	return func(ctx context.Context, req mcreconcile.Request) (ctrl.Result, error) {
+		log := log.FromContext(ctx).WithValues("cluster", req.ClusterName, "name", req.Name)
+
+		cl, err := mgr.GetCluster(ctx, req.ClusterName)
+		if err != nil {
+			return reconcile.Result{}, fmt.Errorf("failed to get cluster: %w", err)
+		}
+
+		ws := &tenancyv1alpha1.Workspace{}
+		if err := cl.GetClient().Get(ctx, req.NamespacedName, ws); err != nil {
+			if apierrors.IsNotFound(err) {
+				log.Info("Workspace deleted")
+				return reconcile.Result{}, nil
+			}
+			return reconcile.Result{}, fmt.Errorf("failed to get workspace: %w", err)
+		}
+
+		if !ws.DeletionTimestamp.IsZero() {
+			log.Info("Workspace deleting")
+			return reconcile.Result{}, nil
+		}
+
+		log.Info("Workspace present", "phase", ws.Status.Phase)
+		return reconcile.Result{}, nil
+	}
 }
