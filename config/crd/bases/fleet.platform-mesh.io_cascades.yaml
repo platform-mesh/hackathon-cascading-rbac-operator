@@ -17,20 +17,20 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
-  name: cascadeobjects.cascade.platform-mesh.io
+  name: cascades.fleet.platform-mesh.io
 spec:
-  group: cascade.platform-mesh.io
+  group: fleet.platform-mesh.io
   names:
-    kind: CascadeObject
-    listKind: CascadeObjectList
-    plural: cascadeobjects
-    singular: cascadeobject
+    kind: Cascade
+    listKind: CascadeList
+    plural: cascades
+    singular: cascade
   scope: Cluster
   versions:
   - name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: CascadeObject allows for defining cascading behavior for Kubernetes
+        description: Cascade allows for defining cascading behavior for Kubernetes
           resources.
         properties:
           apiVersion:
@@ -51,7 +51,7 @@ spec:
           metadata:
             type: object
           spec:
-            description: CascadeObjectSpec defines the desired state of CascadeObject.
+            description: CascadeSpec defines the desired state of Cascade.
             properties:
               gvk:
                 description: GVK defines the GroupVersionKind of the resource to cascade.
@@ -84,7 +84,7 @@ spec:
             - name
             type: object
           status:
-            description: CascadeObjectStatus defines the observed state of CascadeObject.
+            description: CascadeStatus defines the observed state of Cascade.
             properties:
               conditions:
                 description: Conditions represent the latest available observations

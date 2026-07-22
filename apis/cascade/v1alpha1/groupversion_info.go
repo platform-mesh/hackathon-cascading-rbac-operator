@@ -16,7 +16,7 @@ limitations under the License.
 
 // Package v1alpha1 contains API Schema definitions for the cascade v1alpha1 API group.
 // +kubebuilder:object:generate=true
-// +groupName=cascade.platform-mesh.io
+// +groupName=fleet.platform-mesh.io
 package v1alpha1
 
 import (
@@ -26,7 +26,7 @@ import (
 
 var (
 	// GroupVersion is the group version used to register these objects.
-	GroupVersion = schema.GroupVersion{Group: "cascade.platform-mesh.io", Version: "v1alpha1"}
+	GroupVersion = schema.GroupVersion{Group: "fleet.platform-mesh.io", Version: "v1alpha1"}
 
 	// SchemeBuilder is used to add go types to the GroupVersionKind scheme.
 	SchemeBuilder = &scheme.Builder{GroupVersion: GroupVersion}
@@ -36,5 +36,5 @@ var (
 )
 
 func init() {
-	SchemeBuilder.Register(&CascadeObject{}, &CascadeObjectList{})
+	SchemeBuilder.Register(&Cascade{}, &CascadeList{})
 }

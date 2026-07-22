@@ -20,8 +20,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// CascadeObjectSpec defines the desired state of CascadeObject.
-type CascadeObjectSpec struct {
+// CascadeSpec defines the desired state of Cascade.
+type CascadeSpec struct {
 	// GVK defines the GroupVersionKind of the resource to cascade.
 	GVK metav1.GroupVersionKind `json:"gvk"`
 
@@ -38,8 +38,8 @@ type CascadeObjectSpec struct {
 	MaxDepth int32 `json:"maxDepth,omitempty"`
 }
 
-// CascadeObjectStatus defines the observed state of CascadeObject.
-type CascadeObjectStatus struct {
+// CascadeStatus defines the observed state of Cascade.
+type CascadeStatus struct {
 	// Conditions represent the latest available observations of the object's state
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
@@ -53,20 +53,20 @@ type CascadeObjectStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster
 
-// CascadeObject allows for defining cascading behavior for Kubernetes resources.
-type CascadeObject struct {
+// Cascade allows for defining cascading behavior for Kubernetes resources.
+type Cascade struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   CascadeObjectSpec   `json:"spec,omitempty"`
-	Status CascadeObjectStatus `json:"status,omitempty"`
+	Spec   CascadeSpec   `json:"spec,omitempty"`
+	Status CascadeStatus `json:"status,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 
-// CascadeObjectList contains a list of CascadeObject.
-type CascadeObjectList struct {
+// CascadeList contains a list of Cascade.
+type CascadeList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []CascadeObject `json:"items"`
+	Items           []Cascade `json:"items"`
 }

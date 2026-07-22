@@ -15,12 +15,12 @@
 apiVersion: apis.kcp.io/v1alpha2
 kind: APIExport
 metadata:
-  name: cascade.platform-mesh.io
+  name: fleet.platform-mesh.io
 spec:
   resources:
-  - group: cascade.platform-mesh.io
-    name: cascadeobjects
-    schema: v260722-d92e8b2.cascadeobjects.cascade.platform-mesh.io
+  - group: fleet.platform-mesh.io
+    name: cascades
+    schema: v260722-23a1793.cascades.fleet.platform-mesh.io
     storage:
       crd: {}
 status: {}
