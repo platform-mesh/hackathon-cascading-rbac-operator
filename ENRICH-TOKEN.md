@@ -52,3 +52,28 @@ cat ~/.kube/cache/oidc-login/<tokenfile> | jq
 # You can now decode it using b64 --decode or an online decoder like jwt.io
 cat ~/.kube/cache/oidc-login/<tokenfile> | jq -r '.id_token | split(".")[1] | @base64d' | jq
 ```
+
+## NOTE about WorkspaceAuthenticationConfiguration
+
+Platform Mesh does create a WorkspaceAuthenticationConfiguration resource for every organization since it is using workspace-based authentication to support multiple realms.
+The default configuration does look as the following:
+
+```yaml
+...
+spec:
+  jwt:
+  - claimMappings:
+      groups:
+        claim: groups
+        prefix: ""
+      uid: {}
+      username:
+        expression: claims.email
+    claimValidationRules:
+    - expression: claims.?email_verified.orValue(true) == true || claims.?email_verified.orValue(true)
+        == false
+      message: Allowing both verified and unverified emails
+...
+```
+
+So we have to note that it will respect the `groups` claim **BUT will remove the default ```oidc:``` prefix** and just spit out the groups - we need to respect that for our `ClusterRoleBindings`.
