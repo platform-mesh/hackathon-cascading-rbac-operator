@@ -29,10 +29,12 @@ import (
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/manager/signals"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	mcbuilder "sigs.k8s.io/multicluster-runtime/pkg/builder"
@@ -90,6 +92,13 @@ func run() error {
 	if err := mcbuilder.ControllerManagedBy(mgr).
 		Named("kcp-workspace-controller").
 		For(&tenancyv1alpha1.Workspace{}).
+		WithEventFilter(predicate.Funcs{
+			// only trigger on workspace creation
+			CreateFunc:  func(event.CreateEvent) bool { return true },
+			UpdateFunc:  func(event.UpdateEvent) bool { return false },
+			DeleteFunc:  func(event.DeleteEvent) bool { return false },
+			GenericFunc: func(event.GenericEvent) bool { return false },
+		}).
 		Complete(mcreconcile.Func(reconcileWorkspace(mgr, cfg))); err != nil {
 		return fmt.Errorf("failed to build controller: %w", err)
 	}
