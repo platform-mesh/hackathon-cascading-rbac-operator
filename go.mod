@@ -5,6 +5,7 @@ go 1.26.3
 require (
 	github.com/kcp-dev/multicluster-provider v0.8.0
 	github.com/kcp-dev/sdk v0.32.0
+	golang.org/x/sync v0.20.0
 	k8s.io/apimachinery v0.36.0
 	k8s.io/client-go v0.36.0
 	sigs.k8s.io/controller-runtime v0.24.1
@@ -58,7 +59,6 @@ require (
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/net v0.53.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
-	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.43.0 // indirect
 	golang.org/x/term v0.42.0 // indirect
 	golang.org/x/text v0.36.0 // indirect
