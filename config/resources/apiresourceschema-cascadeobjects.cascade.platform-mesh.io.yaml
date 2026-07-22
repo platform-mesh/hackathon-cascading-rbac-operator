@@ -15,7 +15,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v260722-1a0a71e.cascadeobjects.cascade.platform-mesh.io
+  name: v260722-d92e8b2.cascadeobjects.cascade.platform-mesh.io
 spec:
   group: cascade.platform-mesh.io
   names:
@@ -50,19 +50,18 @@ spec:
         spec:
           description: CascadeObjectSpec defines the desired state of CascadeObject.
           properties:
-            gvr:
-              description: GVR defines the GroupVersionResource of the resource to
-                cascade.
+            gvk:
+              description: GVK defines the GroupVersionKind of the resource to cascade.
               properties:
                 group:
                   type: string
-                resource:
+                kind:
                   type: string
                 version:
                   type: string
               required:
               - group
-              - resource
+              - kind
               - version
               type: object
             maxDepth:
@@ -78,7 +77,8 @@ spec:
               description: Namespace defines the namespace of the resource to cascade.
               type: string
           required:
-          - gvr
+          - gvk
+          - name
           type: object
         status:
           description: CascadeObjectStatus defines the observed state of CascadeObject.

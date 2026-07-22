@@ -22,12 +22,11 @@ import (
 
 // CascadeObjectSpec defines the desired state of CascadeObject.
 type CascadeObjectSpec struct {
-	// GVR defines the GroupVersionResource of the resource to cascade.
-	GVR metav1.GroupVersionResource `json:"gvr"`
+	// GVK defines the GroupVersionKind of the resource to cascade.
+	GVK metav1.GroupVersionKind `json:"gvk"`
 
 	// Name defines the name of the resource to cascade.
-	// +optional
-	Name string `json:"name,omitempty"`
+	Name string `json:"name"`
 
 	// Namespace defines the namespace of the resource to cascade.
 	// +optional
