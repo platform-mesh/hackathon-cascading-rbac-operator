@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -43,6 +44,7 @@ import (
 	mcreconcile "sigs.k8s.io/multicluster-runtime/pkg/reconcile"
 
 	apisv1alpha1 "github.com/kcp-dev/sdk/apis/apis/v1alpha1"
+	corev1alpha1 "github.com/kcp-dev/sdk/apis/core/v1alpha1"
 	tenancyv1alpha1 "github.com/kcp-dev/sdk/apis/tenancy/v1alpha1"
 
 	fleetv1alpha1 "github.com/platform-mesh/hackathon-cascading-rbac-operator/apis/fleet/v1alpha1"
@@ -196,10 +198,7 @@ func reconcileCascade(mgr mcmanager.Manager, adminCfg *rest.Config) mcreconcile.
 		// through the fleet APIExport virtual workspace (it cannot be added as a
 		// permissionClaim), so it is read directly from the Cascade's own kcp
 		// workspace using the admin kubeconfig the binary was started with.
-		wsCfg := rest.CopyConfig(adminCfg)
-		wsCfg.Host = baseHost(wsCfg.Host) + "/clusters/" + string(req.ClusterName)
-
-		wsClient, err := client.New(wsCfg, client.Options{})
+		wsClient, err := clusterClient(adminCfg, string(req.ClusterName))
 		if err != nil {
 			return reconcile.Result{}, fmt.Errorf("failed to build workspace client: %w", err)
 		}
@@ -228,8 +227,17 @@ func reconcileCascade(mgr mcmanager.Manager, adminCfg *rest.Config) mcreconcile.
 			"resourceVersion", referenced.GetResourceVersion(),
 		)
 
-		// TODO: cascade the referenced object to child workspaces down to
-		// spec.MaxDepth. Child workspaces are identified by Workspace objects.
+		// Cascade the referenced object into descendant workspaces, down to
+		// spec.MaxDepth levels below this (the source) workspace.
+		if cascade.Spec.MaxDepth < 1 {
+			log.Info("maxDepth < 1, nothing to cascade", "maxDepth", cascade.Spec.MaxDepth)
+			return reconcile.Result{}, nil
+		}
+
+		template := sanitizeForApply(referenced, cascade.Name)
+		if err := cascadeObject(ctx, adminCfg, string(req.ClusterName), template, 0, cascade.Spec.MaxDepth); err != nil {
+			return reconcile.Result{}, fmt.Errorf("failed to cascade object: %w", err)
+		}
 
 		return reconcile.Result{}, nil
 	}
@@ -243,4 +251,123 @@ func baseHost(host string) string {
 		return host[:i]
 	}
 	return host
+}
+
+const (
+	// fieldManager is the server-side-apply field owner used when writing
+	// cascaded copies into descendant workspaces.
+	fieldManager = "cascade-operator"
+
+	// cascadeOwnerLabel is stamped on every cascaded copy so the copies can be
+	// identified (and later cleaned up) by the Cascade that produced them.
+	cascadeOwnerLabel = "cascade.fleet.platform-mesh.io/owner"
+)
+
+// clusterClient returns a controller-runtime client scoped to the given kcp
+// logical cluster, built from the admin config the binary was started with.
+func clusterClient(adminCfg *rest.Config, clusterName string) (client.Client, error) {
+	cfg := rest.CopyConfig(adminCfg)
+	cfg.Host = baseHost(cfg.Host) + "/clusters/" + clusterName
+	return client.New(cfg, client.Options{})
+}
+
+// sanitizeForApply returns a copy of obj suitable for server-side applying into
+// another workspace: identity and spec/data are kept, but server-populated and
+// source-cluster-specific fields are dropped, and the ownership label is set.
+func sanitizeForApply(obj *unstructured.Unstructured, owner string) *unstructured.Unstructured {
+	desired := obj.DeepCopy()
+
+	for _, f := range [][]string{
+		{"metadata", "resourceVersion"},
+		{"metadata", "uid"},
+		{"metadata", "generation"},
+		{"metadata", "creationTimestamp"},
+		{"metadata", "managedFields"},
+		{"metadata", "ownerReferences"},
+		{"metadata", "selfLink"},
+		{"status"},
+	} {
+		unstructured.RemoveNestedField(desired.Object, f...)
+	}
+
+	// Drop the source workspace's own annotations that must not be copied.
+	annotations := desired.GetAnnotations()
+	delete(annotations, "kcp.io/cluster")
+	delete(annotations, "kubectl.kubernetes.io/last-applied-configuration")
+	if len(annotations) == 0 {
+		annotations = nil
+	}
+	desired.SetAnnotations(annotations)
+
+	labels := desired.GetLabels()
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	labels[cascadeOwnerLabel] = owner
+	desired.SetLabels(labels)
+
+	return desired
+}
+
+// cascadeObject walks the descendant workspaces of clusterName depth-first and
+// server-side-applies template into each one, down to maxDepth levels below the
+// Cascade's own workspace. depth is the number of levels already descended
+// (0 == the Cascade's workspace, which is the source and is not written to).
+//
+// It is best-effort: child workspaces that are not Ready are skipped, and errors
+// are collected rather than aborting the walk, so one broken branch does not
+// stop the others.
+func cascadeObject(ctx context.Context, adminCfg *rest.Config, clusterName string, template *unstructured.Unstructured, depth, maxDepth int32) error {
+	logger := log.FromContext(ctx)
+
+	c, err := clusterClient(adminCfg, clusterName)
+	if err != nil {
+		return fmt.Errorf("failed to build client for cluster %q: %w", clusterName, err)
+	}
+
+	// Apply into this workspace, unless it is the source (depth 0).
+	if depth > 0 {
+		if err := applyObject(ctx, c, template); err != nil {
+			return err
+		}
+	}
+
+	// Stop descending once the deepest requested level has been applied.
+	if depth >= maxDepth {
+		return nil
+	}
+
+	workspaces := &tenancyv1alpha1.WorkspaceList{}
+	if err := c.List(ctx, workspaces); err != nil {
+		return fmt.Errorf("failed to list workspaces in cluster %q: %w", clusterName, err)
+	}
+
+	var errs []error
+	for i := range workspaces.Items {
+		ws := &workspaces.Items[i]
+		if ws.Status.Phase != corev1alpha1.LogicalClusterPhaseReady || ws.Spec.Cluster == "" {
+			logger.Info("Skipping workspace that is not ready", "workspace", ws.Name, "phase", ws.Status.Phase)
+			continue
+		}
+
+		childCtx := log.IntoContext(ctx, logger.WithValues("targetCluster", ws.Spec.Cluster, "workspace", ws.Name, "depth", depth+1))
+		if err := cascadeObject(childCtx, adminCfg, ws.Spec.Cluster, template, depth+1, maxDepth); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
+// applyObject server-side-applies a fresh copy of template using the cascade
+// field manager.
+func applyObject(ctx context.Context, c client.Client, template *unstructured.Unstructured) error {
+	desired := template.DeepCopy()
+	ac := client.ApplyConfigurationFromUnstructured(desired)
+	if err := c.Apply(ctx, ac, client.FieldOwner(fieldManager), client.ForceOwnership); err != nil {
+		return fmt.Errorf("failed to apply %s %q: %w", desired.GetKind(), desired.GetName(), err)
+	}
+
+	log.FromContext(ctx).Info("Cascaded object applied", "kind", desired.GetKind(), "name", desired.GetName())
+	return nil
 }
