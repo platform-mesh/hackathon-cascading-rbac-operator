@@ -38,6 +38,8 @@ import (
 	apisv1alpha1 "github.com/kcp-dev/sdk/apis/apis/v1alpha1"
 	tenancyv1alpha1 "github.com/kcp-dev/sdk/apis/tenancy/v1alpha1"
 
+	cascadev1alpha1 "github.com/platform-mesh/hackathon-cascading-rbac-operator/apis/cascade/v1alpha1"
+
 	"github.com/kcp-dev/multicluster-provider/apiexport"
 )
 
@@ -48,6 +50,7 @@ const endpointSliceName = "tenancy.kcp.io"
 func init() {
 	runtime.Must(tenancyv1alpha1.AddToScheme(scheme.Scheme))
 	runtime.Must(apisv1alpha1.AddToScheme(scheme.Scheme))
+	runtime.Must(cascadev1alpha1.AddToScheme(scheme.Scheme))
 }
 
 func main() {
