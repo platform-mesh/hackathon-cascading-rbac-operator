@@ -33,6 +33,7 @@ import (
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -80,6 +81,10 @@ const (
 	// cascadeOwnerLabel is stamped on every cascaded copy so the copies can be
 	// identified (and later cleaned up) by the Cascade that produced them.
 	cascadeOwnerLabel = "cascade.fleet.platform-mesh.io/owner"
+
+	// cascadeFinalizer keeps a Cascade around on deletion until its cascaded
+	// copies have been removed from the descendant workspaces.
+	cascadeFinalizer = "cascade.fleet.platform-mesh.io/cleanup"
 )
 
 func main() {
@@ -265,7 +270,8 @@ func reconcileWorkspace(mgr mcmanager.Manager, cascadeMgr mcmanager.Manager, cac
 
 // reconcileCascade records the Cascade's reach in the cache and cascades the
 // referenced object into descendant workspaces down to spec.MaxDepth levels via
-// server-side apply.
+// server-side apply. A finalizer ensures that when the Cascade is deleted, the
+// copies it created are removed from those descendants first.
 func reconcileCascade(mgr mcmanager.Manager, cache *cascade.Cache, adminCfg *rest.Config) mcreconcile.Func {
 	return func(ctx context.Context, req mcreconcile.Request) (ctrl.Result, error) {
 		log := log.FromContext(ctx).WithValues("cluster", req.ClusterName, "cascade", req.NamespacedName)
@@ -285,10 +291,40 @@ func reconcileCascade(mgr mcmanager.Manager, cache *cascade.Cache, adminCfg *res
 			return reconcile.Result{}, fmt.Errorf("failed to get cascade: %w", err)
 		}
 
+		maxDepth := max(casc.Spec.MaxDepth, 1)
+		gvk := schema.GroupVersionKind{
+			Group:   casc.Spec.GVK.Group,
+			Version: casc.Spec.GVK.Version,
+			Kind:    casc.Spec.GVK.Kind,
+		}
+
+		// Deletion: remove every copy this Cascade created from the descendant
+		// workspaces (identified by the owner label), then drop the finalizer so
+		// the api-server can delete the Cascade.
 		if !casc.DeletionTimestamp.IsZero() {
-			log.Info("Cascade deleting", "cascade", casc.Name)
+			if controllerutil.ContainsFinalizer(casc, cascadeFinalizer) {
+				log.Info("Cascade deleting, cleaning up cascaded copies", "cascade", casc.Name, "gvk", gvk, "maxDepth", maxDepth)
+				if err := cleanupCascaded(ctx, adminCfg, string(req.ClusterName), gvk, casc.Name, maxDepth); err != nil {
+					return reconcile.Result{}, fmt.Errorf("failed to clean up cascaded copies: %w", err)
+				}
+				patch := client.MergeFrom(casc.DeepCopy())
+				controllerutil.RemoveFinalizer(casc, cascadeFinalizer)
+				if err := cl.GetClient().Patch(ctx, casc, patch); err != nil {
+					return reconcile.Result{}, fmt.Errorf("failed to remove finalizer: %w", err)
+				}
+			}
 			cache.Delete(req.ClusterName, req.Name)
 			return reconcile.Result{}, nil
+		}
+
+		// Ensure the finalizer is present before creating anything, so a later
+		// deletion always triggers cleanup.
+		if !controllerutil.ContainsFinalizer(casc, cascadeFinalizer) {
+			patch := client.MergeFrom(casc.DeepCopy())
+			controllerutil.AddFinalizer(casc, cascadeFinalizer)
+			if err := cl.GetClient().Patch(ctx, casc, patch); err != nil {
+				return reconcile.Result{}, fmt.Errorf("failed to add finalizer: %w", err)
+			}
 		}
 
 		path, err := fullClusterPathFromHash(ctx, adminCfg, string(req.ClusterName))
@@ -297,8 +333,6 @@ func reconcileCascade(mgr mcmanager.Manager, cache *cascade.Cache, adminCfg *res
 			return reconcile.Result{}, err
 		}
 
-		maxDepth := max(casc.Spec.MaxDepth, 1)
-
 		cache.Upsert(cascade.Entry{
 			Hash:     req.ClusterName,
 			Name:     casc.Name,
@@ -306,7 +340,7 @@ func reconcileCascade(mgr mcmanager.Manager, cache *cascade.Cache, adminCfg *res
 			MaxDepth: maxDepth,
 		})
 
-		log.Info("Reconciling cascade", "cascade", casc.Name, "path", path, "maxDepth", maxDepth, "gvk", casc.Spec.GVK, "target", casc.Spec.Name)
+		log.Info("Reconciling cascade", "cascade", casc.Name, "path", path, "maxDepth", maxDepth, "gvk", gvk, "target", casc.Spec.Name)
 
 		// The referenced resource is an arbitrary GVK that cannot be exposed
 		// through the fleet APIExport virtual workspace (it cannot be added as a
@@ -317,11 +351,6 @@ func reconcileCascade(mgr mcmanager.Manager, cache *cascade.Cache, adminCfg *res
 			return reconcile.Result{}, fmt.Errorf("failed to build source workspace client: %w", err)
 		}
 
-		gvk := schema.GroupVersionKind{
-			Group:   casc.Spec.GVK.Group,
-			Version: casc.Spec.GVK.Version,
-			Kind:    casc.Spec.GVK.Kind,
-		}
 		referenced := &unstructured.Unstructured{}
 		referenced.SetGroupVersionKind(gvk)
 		key := client.ObjectKey{Namespace: casc.Spec.Namespace, Name: casc.Spec.Name}
@@ -336,7 +365,7 @@ func reconcileCascade(mgr mcmanager.Manager, cache *cascade.Cache, adminCfg *res
 		// Cascade the referenced object into descendant workspaces, down to
 		// maxDepth levels below this (the source) workspace.
 		template := sanitizeForApply(referenced, casc.Name)
-		if err := cascadeObject(ctx, adminCfg, string(req.ClusterName), template, 0, maxDepth); err != nil {
+		if err := cascadeObject(ctx, adminCfg, string(req.ClusterName), template, maxDepth); err != nil {
 			return reconcile.Result{}, fmt.Errorf("failed to cascade object: %w", err)
 		}
 
@@ -450,23 +479,46 @@ func sanitizeForApply(obj *unstructured.Unstructured, owner string) *unstructure
 	return desired
 }
 
-// workspaceReady reports whether a workspace has been scheduled onto a shard and
-// is therefore safe to act on: its logical cluster (spec.cluster) is assigned and
-// its phase is Ready. Both the workspace reconciler (before triggering a Cascade)
-// and the cascade walk (before applying into a descendant) gate on this.
+// workspaceReady reports whether a workspace is safe to act on: it is not being
+// deleted, has been scheduled onto a shard (spec.cluster is assigned), and its
+// phase is Ready. A terminating workspace is excluded even though it may still
+// report Ready: its logical cluster's API server is being torn down, so
+// listing/writing there fails with "failed to get server groups", and its
+// contents are garbage-collected with the workspace anyway. Both the workspace
+// reconciler (before triggering a Cascade) and the cascade walk (before applying
+// into or cleaning up a descendant) gate on this.
 func workspaceReady(ws *tenancyv1alpha1.Workspace) bool {
-	return ws.Status.Phase == corev1alpha1.LogicalClusterPhaseReady && ws.Spec.Cluster != ""
+	return ws.DeletionTimestamp.IsZero() &&
+		ws.Status.Phase == corev1alpha1.LogicalClusterPhaseReady &&
+		ws.Spec.Cluster != ""
 }
 
-// cascadeObject walks the descendant workspaces of clusterName depth-first and
-// server-side-applies template into each one, down to maxDepth levels below the
-// Cascade's own workspace. depth is the number of levels already descended
-// (0 == the Cascade's workspace, which is the source and is not written to).
+// cascadeObject server-side-applies template into every descendant workspace of
+// clusterName, down to maxDepth levels below the Cascade's own (source) workspace.
+func cascadeObject(ctx context.Context, adminCfg *rest.Config, clusterName string, template *unstructured.Unstructured, maxDepth int32) error {
+	return walkDescendants(ctx, adminCfg, clusterName, 0, maxDepth, func(ctx context.Context, c client.Client) error {
+		return applyObject(ctx, c, template)
+	})
+}
+
+// cleanupCascaded deletes every copy this Cascade created (identified by the
+// owner label) from the descendant workspaces of clusterName, down to maxDepth
+// levels below the Cascade's own workspace.
+func cleanupCascaded(ctx context.Context, adminCfg *rest.Config, clusterName string, gvk schema.GroupVersionKind, owner string, maxDepth int32) error {
+	return walkDescendants(ctx, adminCfg, clusterName, 0, maxDepth, func(ctx context.Context, c client.Client) error {
+		return deleteOwnedObjects(ctx, c, gvk, owner)
+	})
+}
+
+// walkDescendants walks the descendant workspaces of clusterName depth-first and
+// invokes fn against a client scoped to each one, down to maxDepth levels below
+// the source workspace. depth is the number of levels already descended
+// (0 == the source workspace, which fn is NOT invoked against).
 //
 // It is best-effort: child workspaces that are not Ready are skipped, and errors
 // are collected rather than aborting the walk, so one broken branch does not
 // stop the others.
-func cascadeObject(ctx context.Context, adminCfg *rest.Config, clusterName string, template *unstructured.Unstructured, depth, maxDepth int32) error {
+func walkDescendants(ctx context.Context, adminCfg *rest.Config, clusterName string, depth, maxDepth int32, fn func(context.Context, client.Client) error) error {
 	logger := log.FromContext(ctx)
 
 	c, err := scopedClient(adminCfg, clusterName)
@@ -474,14 +526,14 @@ func cascadeObject(ctx context.Context, adminCfg *rest.Config, clusterName strin
 		return fmt.Errorf("failed to build client for cluster %q: %w", clusterName, err)
 	}
 
-	// Apply into this workspace, unless it is the source (depth 0).
+	// Act on this workspace, unless it is the source (depth 0).
 	if depth > 0 {
-		if err := applyObject(ctx, c, template); err != nil {
+		if err := fn(ctx, c); err != nil {
 			return err
 		}
 	}
 
-	// Stop descending once the deepest requested level has been applied.
+	// Stop descending once the deepest requested level has been reached.
 	if depth >= maxDepth {
 		return nil
 	}
@@ -500,9 +552,31 @@ func cascadeObject(ctx context.Context, adminCfg *rest.Config, clusterName strin
 		}
 
 		childCtx := log.IntoContext(ctx, logger.WithValues("targetCluster", ws.Spec.Cluster, "workspace", ws.Name, "depth", depth+1))
-		if err := cascadeObject(childCtx, adminCfg, ws.Spec.Cluster, template, depth+1, maxDepth); err != nil {
+		if err := walkDescendants(childCtx, adminCfg, ws.Spec.Cluster, depth+1, maxDepth, fn); err != nil {
 			errs = append(errs, err)
 		}
+	}
+
+	return errors.Join(errs...)
+}
+
+// deleteOwnedObjects deletes every object of the given GVK carrying this
+// Cascade's owner label in the workspace c is scoped to.
+func deleteOwnedObjects(ctx context.Context, c client.Client, gvk schema.GroupVersionKind, owner string) error {
+	list := &unstructured.UnstructuredList{}
+	list.SetGroupVersionKind(schema.GroupVersionKind{Group: gvk.Group, Version: gvk.Version, Kind: gvk.Kind + "List"})
+	if err := c.List(ctx, list, client.MatchingLabels{cascadeOwnerLabel: owner}); err != nil {
+		return fmt.Errorf("failed to list %s: %w", gvk, err)
+	}
+
+	var errs []error
+	for i := range list.Items {
+		item := &list.Items[i]
+		if err := c.Delete(ctx, item); err != nil && !apierrors.IsNotFound(err) {
+			errs = append(errs, fmt.Errorf("failed to delete %s %q: %w", item.GetKind(), item.GetName(), err))
+			continue
+		}
+		log.FromContext(ctx).Info("Deleted cascaded object", "kind", item.GetKind(), "name", item.GetName())
 	}
 
 	return errors.Join(errs...)
