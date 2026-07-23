@@ -1,0 +1,32 @@
+# Copyright The Platform Mesh Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Self-binding of the fleet.platform-mesh.io APIExport within the provider
+# workspace (root:orgs:e2e:cascade-provider). Two purposes:
+#   1. The APIExportEndpointSlice only publishes its virtual-workspace URL once at
+#      least one APIBinding exists, so this binding gives the operator an endpoint
+#      to connect to even before any consumer has installed the provider.
+#   2. It makes the Cascade type available in the provider workspace itself, so
+#      Cascades can be authored/tested here.
+# Consumer accounts get their own binding by installing the provider from the
+# marketplace; this one is just for the provider workspace.
+apiVersion: apis.kcp.io/v1alpha2
+kind: APIBinding
+metadata:
+  name: fleet.platform-mesh.io
+spec:
+  reference:
+    export:
+      name: fleet.platform-mesh.io
+      path: root:orgs:e2e:cascade-provider

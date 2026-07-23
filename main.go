@@ -22,49 +22,65 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
-	"golang.org/x/sync/errgroup"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/manager/signals"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	mcbuilder "sigs.k8s.io/multicluster-runtime/pkg/builder"
 	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
 	mcreconcile "sigs.k8s.io/multicluster-runtime/pkg/reconcile"
 
+	"github.com/spf13/pflag"
+	"golang.org/x/sync/errgroup"
+
+	"github.com/kcp-dev/logicalcluster/v3"
 	apisv1alpha1 "github.com/kcp-dev/sdk/apis/apis/v1alpha1"
+	"github.com/kcp-dev/sdk/apis/core"
 	corev1alpha1 "github.com/kcp-dev/sdk/apis/core/v1alpha1"
 	tenancyv1alpha1 "github.com/kcp-dev/sdk/apis/tenancy/v1alpha1"
 
 	fleetv1alpha1 "github.com/platform-mesh/hackathon-cascading-rbac-operator/apis/fleet/v1alpha1"
+	"github.com/platform-mesh/hackathon-cascading-rbac-operator/cascade"
 
 	"github.com/kcp-dev/multicluster-provider/apiexport"
 )
 
-// tenancyEndpointSliceName is the name of the APIExportEndpointSlice for the tenancy
-// API. It lives in the root workspace and is always called "tenancy.kcp.io".
-const tenancyEndpointSliceName = "tenancy.kcp.io"
-
-// fleetEndpointSliceName is the name of the APIExportEndpointSlice for the fleet
-// API. It lives in the root workspace and is always called "fleet.platform-mesh.io".
-const fleetEndpointSliceName = "fleet.platform-mesh.io"
-
 func init() {
 	runtime.Must(tenancyv1alpha1.AddToScheme(scheme.Scheme))
 	runtime.Must(apisv1alpha1.AddToScheme(scheme.Scheme))
+	runtime.Must(corev1alpha1.AddToScheme(scheme.Scheme))
 	runtime.Must(fleetv1alpha1.AddToScheme(scheme.Scheme))
 }
+
+// reconcileRequestedAtAnnotation is touched on a Cascade to trigger a reconcile
+// via the api-server when a covered workspace is created.
+const reconcileRequestedAtAnnotation = "fleet.platform-mesh.io/reconcile-requested-at"
+
+const (
+	// fieldManager is the server-side-apply field owner used when writing
+	// cascaded copies into descendant workspaces.
+	fieldManager = "cascade-operator"
+
+	// cascadeOwnerLabel is stamped on every cascaded copy so the copies can be
+	// identified (and later cleaned up) by the Cascade that produced them.
+	cascadeOwnerLabel = "cascade.fleet.platform-mesh.io/owner"
+)
 
 func main() {
 	if err := run(); err != nil {
@@ -79,79 +95,94 @@ func run() error {
 	ctx := signals.SetupSignalHandler()
 	entryLog := log.Log.WithName("entrypoint")
 
+	// The tenancy API (workspaces) and the fleet API (cascades) are served by
+	// separate APIExports, potentially residing in different workspaces. Each
+	// flag has the form "<workspace-path>/<endpointslice-name>", e.g.
+	// "root:orgs:e2e:cascade-provider/fleet.platform-mesh.io".
+	var tenancyEndpoint, cascadeEndpoint string
+	pflag.StringVar(&tenancyEndpoint, "tenancy-endpoint", "root/tenancy.kcp.io", "APIExportEndpointSlice for the tenancy API (workspaces), as <workspace-path>/<endpointslice-name>")
+	pflag.StringVar(&cascadeEndpoint, "cascade-endpoint", "root/fleet.platform-mesh.io", "APIExportEndpointSlice for the fleet API (cascades), as <workspace-path>/<endpointslice-name>")
+	pflag.Parse()
+
 	cfg := ctrl.GetConfigOrDie()
 
-	// Setup the kcp apiexport provider. This makes workspaces available as
-	// clusters to the multicluster manager but does not engage them yet.
-	entryLog.Info("Setting up provider", "endpointslice", tenancyEndpointSliceName)
-	provider, err := apiexport.New(cfg, tenancyEndpointSliceName, apiexport.Options{})
+	tenancyCfg, tenancySlice, err := configForEndpoint(cfg, tenancyEndpoint)
 	if err != nil {
-		return fmt.Errorf("unable to construct cluster provider: %w", err)
+		return fmt.Errorf("invalid --tenancy-endpoint: %w", err)
+	}
+	entryLog.Info("Setting up tenancy provider", "endpoint", tenancyEndpoint)
+	tenancyProvider, err := apiexport.New(tenancyCfg, tenancySlice, apiexport.Options{})
+	if err != nil {
+		return fmt.Errorf("unable to construct tenancy cluster provider: %w", err)
+	}
+	wsMgr, err := mcmanager.New(cfg, tenancyProvider, manager.Options{})
+	if err != nil {
+		return fmt.Errorf("unable to set up tenancy manager: %w", err)
 	}
 
-	// Setup the kcp apiexport provider. This makes workspaces available as
-	// clusters to the multicluster manager but does not engage them yet.
-	entryLog.Info("Setting up provider", "endpointslice", fleetEndpointSliceName)
-	fleetProvider, err := apiexport.New(cfg, fleetEndpointSliceName, apiexport.Options{})
+	cascadeCfg, cascadeSlice, err := configForEndpoint(cfg, cascadeEndpoint)
 	if err != nil {
-		return fmt.Errorf("unable to construct cluster provider: %w", err)
+		return fmt.Errorf("invalid --cascade-endpoint: %w", err)
 	}
-
-	entryLog.Info("Setting up manager for workspace controller")
-	mgr, err := mcmanager.New(cfg, provider, manager.Options{})
+	entryLog.Info("Setting up cascade provider", "endpoint", cascadeEndpoint)
+	cascadeProvider, err := apiexport.New(cascadeCfg, cascadeSlice, apiexport.Options{})
 	if err != nil {
-		return fmt.Errorf("unable to set up overall controller manager: %w", err)
+		return fmt.Errorf("unable to construct cascade cluster provider: %w", err)
 	}
-
-	entryLog.Info("Setting up manager for cascade controller")
-	// Distinct metrics bind address: both managers run concurrently and the
-	// default (:8080) would otherwise collide with mgr's metrics server.
-	fleetMgr, err := mcmanager.New(cfg, fleetProvider, manager.Options{
-		Metrics: metricsserver.Options{BindAddress: ":8081"},
+	cascadeMgr, err := mcmanager.New(cfg, cascadeProvider, manager.Options{
+		Metrics: metricsserver.Options{BindAddress: "0"},
 	})
 	if err != nil {
-		return fmt.Errorf("unable to set up fleet controller manager: %w", err)
+		return fmt.Errorf("unable to set up cascade manager: %w", err)
 	}
 
-	// Setup the controllers
-	if err := mcbuilder.ControllerManagedBy(mgr).
+	// cache records each Cascade's reach (its own workspace path + maxDepth). It
+	// is populated by the cascade reconciler and consulted by the workspace
+	// reconciler to decide whether a newly created workspace is covered by a
+	// cascade living in one of its ancestors.
+	cache := cascade.NewCache()
+
+	if err := mcbuilder.ControllerManagedBy(wsMgr).
 		Named("kcp-workspace-controller").
 		For(&tenancyv1alpha1.Workspace{}).
-		Complete(mcreconcile.Func(reconcileWorkspace(mgr))); err != nil {
-		return fmt.Errorf("failed to build controller: %w", err)
+		WithEventFilter(predicate.Funcs{
+			// only trigger on workspace creation
+			CreateFunc:  func(event.CreateEvent) bool { return true },
+			UpdateFunc:  func(event.UpdateEvent) bool { return false },
+			DeleteFunc:  func(event.DeleteEvent) bool { return false },
+			GenericFunc: func(event.GenericEvent) bool { return false },
+		}).
+		Complete(mcreconcile.Func(reconcileWorkspace(wsMgr, cascadeMgr, cache))); err != nil {
+		return fmt.Errorf("failed to build workspace controller: %w", err)
 	}
 
-	if err := mcbuilder.ControllerManagedBy(fleetMgr).
-		Named("kcp-fleet-controller").
+	if err := mcbuilder.ControllerManagedBy(cascadeMgr).
+		Named("cascade-controller").
 		For(&fleetv1alpha1.Cascade{}).
-		Complete(mcreconcile.Func(reconcileCascade(fleetMgr, cfg))); err != nil {
+		Complete(mcreconcile.Func(reconcileCascade(cascadeMgr, cache, cfg))); err != nil {
 		return fmt.Errorf("failed to build cascade controller: %w", err)
 	}
 
-	// Manager.Start blocks until the context is cancelled, so the two managers
-	// must run concurrently. errgroup.WithContext ties them together: if either
-	// manager stops (error or shutdown), the derived context cancels the other.
+	// Run both managers concurrently; if either stops, the shared context is
+	// cancelled and the other stops too.
 	entryLog.Info("Starting managers")
 	g, ctx := errgroup.WithContext(ctx)
-	g.Go(func() error {
-		if err := mgr.Start(ctx); err != nil {
-			return fmt.Errorf("unable to run manager: %w", err)
-		}
-		return nil
-	})
-	g.Go(func() error {
-		if err := fleetMgr.Start(ctx); err != nil {
-			return fmt.Errorf("unable to run fleet manager: %w", err)
-		}
-		return nil
-	})
+	g.Go(func() error { return wsMgr.Start(ctx) })
+	g.Go(func() error { return cascadeMgr.Start(ctx) })
+	if err := g.Wait(); err != nil {
+		return fmt.Errorf("unable to run managers: %w", err)
+	}
 
-	return g.Wait()
+	return nil
 }
 
-func reconcileWorkspace(mgr mcmanager.Manager) mcreconcile.Func {
+// reconcileWorkspace triggers the covering Cascade(s) whenever a workspace is
+// created. It resolves the new workspace's path, asks the cache which Cascades
+// reach it, and patches each of those Cascades so their reconciler re-runs and
+// (re-)applies the cascaded object into the new workspace.
+func reconcileWorkspace(mgr mcmanager.Manager, cascadeMgr mcmanager.Manager, cache *cascade.Cache) mcreconcile.Func {
 	return func(ctx context.Context, req mcreconcile.Request) (ctrl.Result, error) {
-		log := log.FromContext(ctx).WithValues("cluster", req.ClusterName, "name", req.Name)
+		log := log.FromContext(ctx).WithValues("cluster", req.ClusterName, "workspace", req.Name)
 
 		cl, err := mgr.GetCluster(ctx, req.ClusterName)
 		if err != nil {
@@ -172,46 +203,129 @@ func reconcileWorkspace(mgr mcmanager.Manager) mcreconcile.Func {
 			return reconcile.Result{}, nil
 		}
 
-		log.Info("Workspace present", "phase", ws.Status.Phase)
+		// A freshly created workspace is not scheduled onto a shard yet, so it
+		// cannot be cascaded into and triggering the covering Cascade now would be
+		// a no-op that never re-fires (the controller only watches creation).
+		// Requeue until the workspace is ready, then trigger.
+		if !workspaceReady(ws) {
+			log.Info("Workspace not ready yet, requeueing", "phase", ws.Status.Phase)
+			return reconcile.Result{}, fmt.Errorf("workspace %q not ready yet (phase %q, cluster %q)", ws.Name, ws.Status.Phase, ws.Spec.Cluster)
+		}
+
+		// The workspace's own path is embedded in its spec.URL
+		// (".../clusters/<path>"), so we read it directly instead of making an
+		// extra call to resolve the parent's path from its LogicalCluster.
+		childPath, err := fullClusterPathFromURL(ws.Spec.URL)
+		if err != nil {
+			log.Info("Workspace URL not populated yet, requeueing", "err", err.Error())
+			return reconcile.Result{}, err
+		}
+
+		log.Info("Workspace present", "path", childPath, "phase", ws.Status.Phase)
+
+		matches := cache.Match(childPath)
+		if len(matches) == 0 {
+			log.Info("No cascades cover this workspace", "path", childPath)
+			return reconcile.Result{}, nil
+		}
+
+		// Trigger each covering Cascade's reconciler by patching a timestamp
+		// annotation. We patch on the cascade's own logical cluster, reached via
+		// the cascade manager's per-cluster client.
+		for _, e := range matches {
+			cascadeCl, err := cascadeMgr.GetCluster(ctx, e.Hash)
+			if err != nil {
+				log.Info("Cascade cluster not engaged, skipping trigger", "cascade", e.Name, "cascadeCluster", e.Hash, "err", err.Error())
+				continue
+			}
+			c := &fleetv1alpha1.Cascade{}
+			if err := cascadeCl.GetClient().Get(ctx, types.NamespacedName{Name: e.Name}, c); err != nil {
+				if apierrors.IsNotFound(err) {
+					cache.Delete(e.Hash, e.Name)
+					continue
+				}
+				log.Info("Failed to get cascade for trigger", "cascade", e.Name, "err", err.Error())
+				continue
+			}
+			patch := client.MergeFrom(c.DeepCopy())
+			if c.Annotations == nil {
+				c.Annotations = map[string]string{}
+			}
+			c.Annotations[reconcileRequestedAtAnnotation] = time.Now().UTC().Format(time.RFC3339Nano)
+			if err := cascadeCl.GetClient().Patch(ctx, c, patch); err != nil {
+				log.Info("Failed to patch cascade", "cascade", e.Name, "err", err.Error())
+				continue
+			}
+			log.Info("Triggered cascade through workspace", "cascade", e.Name, "cascadePath", e.Path, "path", childPath)
+		}
+
 		return reconcile.Result{}, nil
 	}
 }
-func reconcileCascade(mgr mcmanager.Manager, adminCfg *rest.Config) mcreconcile.Func {
+
+// reconcileCascade records the Cascade's reach in the cache and cascades the
+// referenced object into descendant workspaces down to spec.MaxDepth levels via
+// server-side apply.
+func reconcileCascade(mgr mcmanager.Manager, cache *cascade.Cache, adminCfg *rest.Config) mcreconcile.Func {
 	return func(ctx context.Context, req mcreconcile.Request) (ctrl.Result, error) {
-		log := log.FromContext(ctx).WithValues("cluster", req.ClusterName, "name", req.Name)
+		log := log.FromContext(ctx).WithValues("cluster", req.ClusterName, "cascade", req.NamespacedName)
 
 		cl, err := mgr.GetCluster(ctx, req.ClusterName)
 		if err != nil {
 			return reconcile.Result{}, fmt.Errorf("failed to get cluster: %w", err)
 		}
 
-		cascade := &fleetv1alpha1.Cascade{}
-		if err := cl.GetClient().Get(ctx, req.NamespacedName, cascade); err != nil {
+		casc := &fleetv1alpha1.Cascade{}
+		if err := cl.GetClient().Get(ctx, req.NamespacedName, casc); err != nil {
 			if apierrors.IsNotFound(err) {
 				log.Info("Cascade deleted")
+				cache.Delete(req.ClusterName, req.Name)
 				return reconcile.Result{}, nil
 			}
 			return reconcile.Result{}, fmt.Errorf("failed to get cascade: %w", err)
 		}
 
+		if !casc.DeletionTimestamp.IsZero() {
+			log.Info("Cascade deleting", "cascade", casc.Name)
+			cache.Delete(req.ClusterName, req.Name)
+			return reconcile.Result{}, nil
+		}
+
+		path, err := fullClusterPathFromHash(ctx, adminCfg, string(req.ClusterName))
+		if err != nil {
+			log.Info("Cascade path not resolvable yet, requeueing", "cascade", casc.Name, "err", err.Error())
+			return reconcile.Result{}, err
+		}
+
+		maxDepth := max(casc.Spec.MaxDepth, 1)
+
+		cache.Upsert(cascade.Entry{
+			Hash:     req.ClusterName,
+			Name:     casc.Name,
+			Path:     path,
+			MaxDepth: maxDepth,
+		})
+
+		log.Info("Reconciling cascade", "cascade", casc.Name, "path", path, "maxDepth", maxDepth, "gvk", casc.Spec.GVK, "target", casc.Spec.Name)
+
 		// The referenced resource is an arbitrary GVK that cannot be exposed
 		// through the fleet APIExport virtual workspace (it cannot be added as a
 		// permissionClaim), so it is read directly from the Cascade's own kcp
 		// workspace using the admin kubeconfig the binary was started with.
-		wsClient, err := clusterClient(adminCfg, string(req.ClusterName))
+		srcClient, err := scopedClient(adminCfg, string(req.ClusterName))
 		if err != nil {
-			return reconcile.Result{}, fmt.Errorf("failed to build workspace client: %w", err)
+			return reconcile.Result{}, fmt.Errorf("failed to build source workspace client: %w", err)
 		}
 
 		gvk := schema.GroupVersionKind{
-			Group:   cascade.Spec.GVK.Group,
-			Version: cascade.Spec.GVK.Version,
-			Kind:    cascade.Spec.GVK.Kind,
+			Group:   casc.Spec.GVK.Group,
+			Version: casc.Spec.GVK.Version,
+			Kind:    casc.Spec.GVK.Kind,
 		}
 		referenced := &unstructured.Unstructured{}
 		referenced.SetGroupVersionKind(gvk)
-		key := client.ObjectKey{Namespace: cascade.Spec.Namespace, Name: cascade.Spec.Name}
-		if err := wsClient.Get(ctx, key, referenced); err != nil {
+		key := client.ObjectKey{Namespace: casc.Spec.Namespace, Name: casc.Spec.Name}
+		if err := srcClient.Get(ctx, key, referenced); err != nil {
 			if apierrors.IsNotFound(err) {
 				log.Info("Referenced resource not found", "gvk", gvk, "key", key)
 				return reconcile.Result{}, nil
@@ -219,23 +333,10 @@ func reconcileCascade(mgr mcmanager.Manager, adminCfg *rest.Config) mcreconcile.
 			return reconcile.Result{}, fmt.Errorf("failed to get referenced resource %s %s: %w", gvk, key, err)
 		}
 
-		log.Info("Referenced resource found",
-			"gvk", gvk,
-			"name", referenced.GetName(),
-			"namespace", referenced.GetNamespace(),
-			"uid", referenced.GetUID(),
-			"resourceVersion", referenced.GetResourceVersion(),
-		)
-
 		// Cascade the referenced object into descendant workspaces, down to
-		// spec.MaxDepth levels below this (the source) workspace.
-		if cascade.Spec.MaxDepth < 1 {
-			log.Info("maxDepth < 1, nothing to cascade", "maxDepth", cascade.Spec.MaxDepth)
-			return reconcile.Result{}, nil
-		}
-
-		template := sanitizeForApply(referenced, cascade.Name)
-		if err := cascadeObject(ctx, adminCfg, string(req.ClusterName), template, 0, cascade.Spec.MaxDepth); err != nil {
+		// maxDepth levels below this (the source) workspace.
+		template := sanitizeForApply(referenced, casc.Name)
+		if err := cascadeObject(ctx, adminCfg, string(req.ClusterName), template, 0, maxDepth); err != nil {
 			return reconcile.Result{}, fmt.Errorf("failed to cascade object: %w", err)
 		}
 
@@ -243,32 +344,72 @@ func reconcileCascade(mgr mcmanager.Manager, adminCfg *rest.Config) mcreconcile.
 	}
 }
 
-// baseHost returns the kcp base URL from a possibly workspace-scoped host by
-// stripping any trailing "/clusters/<name>" segment, so that a specific
-// workspace path can be appended.
-func baseHost(host string) string {
-	if i := strings.Index(host, "/clusters/"); i != -1 {
-		return host[:i]
+// configForEndpoint parses an endpoint flag of the form
+// "<workspace-path>/<endpointslice-name>" and returns a rest.Config scoped to
+// that workspace path together with the endpointslice name. If no "/" is
+// present the whole value is treated as the endpointslice name and the base
+// config is used unscoped.
+func configForEndpoint(base *rest.Config, endpoint string) (*rest.Config, string, error) {
+	path, sliceName, found := strings.Cut(endpoint, "/")
+	if !found {
+		return base, endpoint, nil
 	}
-	return host
+	if path == "" || sliceName == "" {
+		return nil, "", fmt.Errorf("expected <workspace-path>/<endpointslice-name>, got %q", endpoint)
+	}
+
+	cfg := rest.CopyConfig(base)
+	if idx := strings.Index(cfg.Host, "/clusters/"); idx != -1 {
+		cfg.Host = cfg.Host[:idx]
+	}
+	cfg.Host += logicalcluster.NewPath(path).RequestPath()
+	return cfg, sliceName, nil
 }
 
-const (
-	// fieldManager is the server-side-apply field owner used when writing
-	// cascaded copies into descendant workspaces.
-	fieldManager = "cascade-operator"
+// fullClusterPathFromURL calculates the full workspace path from a workspace url.
+// This is a quick and dirty hack, so we don't have to look up the logicalcluster
+func fullClusterPathFromURL(url string) (string, error) {
+	_, path, found := strings.Cut(url, "/clusters/")
+	if !found || path == "" {
+		return "", fmt.Errorf("no /clusters/ segment in workspace URL %q", url)
+	}
+	if i := strings.IndexByte(path, '/'); i != -1 {
+		path = path[:i]
+	}
+	return path, nil
+}
 
-	// cascadeOwnerLabel is stamped on every cascaded copy so the copies can be
-	// identified (and later cleaned up) by the Cascade that produced them.
-	cascadeOwnerLabel = "cascade.fleet.platform-mesh.io/owner"
-)
+// fullClusterPathFromHash calculates the full workspace path from a logical cluster hash
+func fullClusterPathFromHash(ctx context.Context, adminCfg *rest.Config, hash string) (string, error) {
+	cl, err := scopedClient(adminCfg, hash)
+	if err != nil {
+		return "", fmt.Errorf("failed to build client for logical cluster %q: %w", hash, err)
+	}
+	lc := &corev1alpha1.LogicalCluster{}
+	if err := cl.Get(ctx, types.NamespacedName{Name: corev1alpha1.LogicalClusterName}, lc); err != nil {
+		return "", fmt.Errorf("failed to get LogicalCluster singleton: %w", err)
+	}
+	if p := lc.Annotations[core.LogicalClusterPathAnnotationKey]; p != "" {
+		return p, nil
+	}
+	// The root logical cluster carries no kcp.io/path annotation because its
+	// cluster name ("root") is already its path. Any other cluster without the
+	// annotation only has a hash, which is not a usable path yet, so requeue.
+	if name := logicalcluster.From(lc); name == core.RootCluster {
+		return name.Path().String(), nil
+	}
+	return "", fmt.Errorf("LogicalCluster %q has no %s annotation yet", logicalcluster.From(lc), core.LogicalClusterPathAnnotationKey)
+}
 
-// clusterClient returns a controller-runtime client scoped to the given kcp
-// logical cluster, built from the admin config the binary was started with.
-func clusterClient(adminCfg *rest.Config, clusterName string) (client.Client, error) {
-	cfg := rest.CopyConfig(adminCfg)
-	cfg.Host = baseHost(cfg.Host) + "/clusters/" + clusterName
-	return client.New(cfg, client.Options{})
+// scopedClient builds a client against a specific logical cluster, identified by
+// its hash or full path.
+func scopedClient(baseCfg *rest.Config, path string) (client.Client, error) {
+	cfg := rest.CopyConfig(baseCfg)
+	if idx := strings.Index(cfg.Host, "/clusters/"); idx != -1 {
+		cfg.Host = cfg.Host[:idx]
+	}
+	cfg.Host += logicalcluster.NewPath(path).RequestPath()
+	return client.New(cfg, client.Options{Scheme: scheme.Scheme})
 }
 
 // sanitizeForApply returns a copy of obj suitable for server-side applying into
@@ -309,6 +450,14 @@ func sanitizeForApply(obj *unstructured.Unstructured, owner string) *unstructure
 	return desired
 }
 
+// workspaceReady reports whether a workspace has been scheduled onto a shard and
+// is therefore safe to act on: its logical cluster (spec.cluster) is assigned and
+// its phase is Ready. Both the workspace reconciler (before triggering a Cascade)
+// and the cascade walk (before applying into a descendant) gate on this.
+func workspaceReady(ws *tenancyv1alpha1.Workspace) bool {
+	return ws.Status.Phase == corev1alpha1.LogicalClusterPhaseReady && ws.Spec.Cluster != ""
+}
+
 // cascadeObject walks the descendant workspaces of clusterName depth-first and
 // server-side-applies template into each one, down to maxDepth levels below the
 // Cascade's own workspace. depth is the number of levels already descended
@@ -320,7 +469,7 @@ func sanitizeForApply(obj *unstructured.Unstructured, owner string) *unstructure
 func cascadeObject(ctx context.Context, adminCfg *rest.Config, clusterName string, template *unstructured.Unstructured, depth, maxDepth int32) error {
 	logger := log.FromContext(ctx)
 
-	c, err := clusterClient(adminCfg, clusterName)
+	c, err := scopedClient(adminCfg, clusterName)
 	if err != nil {
 		return fmt.Errorf("failed to build client for cluster %q: %w", clusterName, err)
 	}
@@ -345,7 +494,7 @@ func cascadeObject(ctx context.Context, adminCfg *rest.Config, clusterName strin
 	var errs []error
 	for i := range workspaces.Items {
 		ws := &workspaces.Items[i]
-		if ws.Status.Phase != corev1alpha1.LogicalClusterPhaseReady || ws.Spec.Cluster == "" {
+		if !workspaceReady(ws) {
 			logger.Info("Skipping workspace that is not ready", "workspace", ws.Name, "phase", ws.Status.Phase)
 			continue
 		}

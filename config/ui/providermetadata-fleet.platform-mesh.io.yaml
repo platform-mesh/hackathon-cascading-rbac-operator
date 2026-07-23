@@ -1,0 +1,49 @@
+# Copyright The Platform Mesh Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# ProviderMetadata: advertises the fleet.platform-mesh.io APIExport in the
+# Platform Mesh portal marketplace so it can be bound from the UI. Binding it
+# into an account creates the APIBinding that makes the Cascade resource (and,
+# via the content-for label, the Cascades nav node from
+# contentconfiguration-cascades.yaml) available in that account.
+#
+# metadata.name MUST equal the APIExport name (fleet.platform-mesh.io).
+#
+# Placement: apply this to root:platform-mesh-system, which serves the
+# ui.platform-mesh.io API (via the core.platform-mesh.io APIExport) alongside the
+# ContentConfigurations. Note this differs from the e2e providers, whose
+# ProviderMetadata is co-located with its APIExport in the provider account; the
+# fleet APIExport lives in the kcp `root` workspace (which does not serve
+# ui.platform-mesh.io), so the two are intentionally not co-located here. The
+# marketplace bind action must therefore resolve the export at path `root`.
+apiVersion: ui.platform-mesh.io/v1alpha1
+kind: ProviderMetadata
+metadata:
+  name: fleet.platform-mesh.io
+spec:
+  displayName: Cascading RBAC (Hackathon)
+  description: |
+    Hackathon proof-of-concept that cascades a referenced resource (for example a
+    ClusterRole) from a source workspace into its descendant workspaces via the
+    Cascade API. Bind this export to author Cascade resources in your account.
+  contacts:
+    - displayName: Platform Mesh Hackathon
+      email: e2e@platform-mesh.test
+      role:
+        - Maintainer
+  icon:
+    light:
+      data: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyMDAgMjAwIj48Y2lyY2xlIGN4PSIxMDAiIGN5PSIxMDAiIHI9IjkwIiBmaWxsPSIjNGY0NmU1Ii8+PHJlY3QgeD0iNTIiIHk9IjUyIiB3aWR0aD0iOTYiIGhlaWdodD0iMjQiIHJ4PSI2IiBmaWxsPSIjZmZmIi8+PHJlY3QgeD0iNjYiIHk9Ijg4IiB3aWR0aD0iOTYiIGhlaWdodD0iMjQiIHJ4PSI2IiBmaWxsPSIjZmZmIiBvcGFjaXR5PSIwLjg1Ii8+PHJlY3QgeD0iODAiIHk9IjEyNCIgd2lkdGg9Ijk2IiBoZWlnaHQ9IjI0IiByeD0iNiIgZmlsbD0iI2ZmZiIgb3BhY2l0eT0iMC43Ii8+PC9zdmc+"
+    dark:
+      data: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyMDAgMjAwIj48Y2lyY2xlIGN4PSIxMDAiIGN5PSIxMDAiIHI9IjkwIiBmaWxsPSIjMzEyZTgxIi8+PHJlY3QgeD0iNTIiIHk9IjUyIiB3aWR0aD0iOTYiIGhlaWdodD0iMjQiIHJ4PSI2IiBmaWxsPSIjYzdkMmZlIi8+PHJlY3QgeD0iNjYiIHk9Ijg4IiB3aWR0aD0iOTYiIGhlaWdodD0iMjQiIHJ4PSI2IiBmaWxsPSIjYzdkMmZlIiBvcGFjaXR5PSIwLjg1Ii8+PHJlY3QgeD0iODAiIHk9IjEyNCIgd2lkdGg9Ijk2IiBoZWlnaHQ9IjI0IiByeD0iNiIgZmlsbD0iI2M3ZDJmZSIgb3BhY2l0eT0iMC43Ii8+PC9zdmc+"

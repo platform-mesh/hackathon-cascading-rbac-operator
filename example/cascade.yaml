@@ -12,20 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-apiVersion: apis.kcp.io/v1alpha2
-kind: APIExport
+# Demo Cascade: copies the example-configmap-viewer ClusterRole from this
+# workspace down to 2 levels of descendant workspaces. setup.sh creates the
+# referenced ClusterRole (from example/clusterrole.yaml) alongside this Cascade.
+apiVersion: fleet.platform-mesh.io/v1alpha1
+kind: Cascade
 metadata:
-  name: fleet.platform-mesh.io
-  labels:
-    # Joins this APIExport to its ProviderMetadata (same name) so the Marketplace
-    # virtual workspace builds a MarketplaceEntry, and scopes the content-for
-    # ContentConfiguration (cascades-ui) to accounts that bound this export.
-    ui.platform-mesh.io/content-for: fleet.platform-mesh.io
+  name: demo
 spec:
-  resources:
-  - group: fleet.platform-mesh.io
-    name: cascades
-    schema: v260722-23a1793.cascades.fleet.platform-mesh.io
-    storage:
-      crd: {}
-status: {}
+  maxDepth: 2
+  gvk:
+    group: rbac.authorization.k8s.io
+    version: v1
+    kind: ClusterRole
+  name: example-configmap-viewer

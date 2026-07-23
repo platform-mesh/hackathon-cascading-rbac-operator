@@ -1,0 +1,106 @@
+# Copyright The Platform Mesh Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# ContentConfiguration: renders ClusterRoles (rbac.authorization.k8s.io/v1) in
+# the Platform Mesh portal, read-only, using the built-in generic-list-view /
+# generic-detail-view web components (no separate micro-frontend). Pattern from
+# github.com/platform-mesh/example-api-extraction.
+#
+# "Default" view: only the ui.platform-mesh.io/entity label is set (no
+# content-for), so the node appears on every account/workspace page, like the
+# built-in Namespaces node. This is the payoff view for the cascade demo: the
+# ClusterRole cascaded into a child workspace shows up here.
+#
+# Read-only: only listView + detailView are defined. Omitting createView removes
+# the Create button (gated on ui.createView.fields.length in the portal), and no
+# listView.actions are declared, so no edit/delete row actions are rendered.
+#
+# GraphQL identifiers are the underscored form of the API group
+# (rbac.authorization.k8s.io -> rbac_authorization_k8s_io).
+apiVersion: ui.platform-mesh.io/v1alpha1
+kind: ContentConfiguration
+metadata:
+  name: clusterroles-ui
+  labels:
+    ui.platform-mesh.io/entity: core_platform-mesh_io_account
+spec:
+  inlineConfiguration:
+    contentType: json
+    content: |-
+      {
+        "name": "clusterroles",
+        "luigiConfigFragment": {
+          "data": {
+            "nodes": [
+              {
+                "pathSegment": "rbac_authorization_k8s_io_clusterroles",
+                "navigationContext": "rbac_authorization_k8s_io_clusterroles",
+                "label": "Cluster Roles",
+                "icon": "permission",
+                "order": 860,
+                "category": { "id": "hackathon", "isGroup": true, "label": "HACKATHON", "icon": "org-chart", "order": 900 },
+                "entityType": "main.core_platform-mesh_io_account",
+                "keepSelectedForChildren": true,
+                "url": "/assets/platform-mesh-portal-ui-wc.js#generic-list-view",
+                "webcomponent": { "selfRegistered": true },
+                "context": {
+                  "resourceDefinition": {
+                    "apiGroup": "rbac_authorization_k8s_io",
+                    "version": "v1",
+                    "entity": "ClusterRole",
+                    "entityCollection": "ClusterRoles",
+                    "scope": "Cluster",
+                    "namespace": null,
+                    "ui": {
+                      "listView": {
+                        "fields": [
+                          { "label": "Name", "property": "metadata.name" }
+                        ]
+                      },
+                      "detailView": {
+                        "fields": [
+                          { "label": "Name", "property": "metadata.name" },
+                          { "label": "Rule API Groups", "property": ["rules.apiGroups"], "jsonPathExpression": "rules[*].apiGroups" },
+                          { "label": "Rule Resources", "property": ["rules.resources"], "jsonPathExpression": "rules[*].resources" },
+                          { "label": "Rule Verbs", "property": ["rules.verbs"], "jsonPathExpression": "rules[*].verbs" }
+                        ]
+                      }
+                    }
+                  }
+                },
+                "children": [
+                  {
+                    "pathSegment": ":clusterRoleId",
+                    "hideFromNav": true,
+                    "keepSelectedForChildren": false,
+                    "url": "/assets/platform-mesh-portal-ui-wc.js#generic-detail-view",
+                    "webcomponent": { "selfRegistered": true },
+                    "defineEntity": {
+                      "id": "rbac_authorization_k8s_io_clusterrole",
+                      "contextKey": "clusterRoleId"
+                    },
+                    "context": {
+                      "resourceId": ":clusterRoleId"
+                    }
+                  }
+                ]
+              }
+            ],
+            "texts": [
+              { "locale": "",   "textDictionary": { "clusterroles": "Cluster Roles" } },
+              { "locale": "en", "textDictionary": { "clusterroles": "Cluster Roles" } }
+            ]
+          }
+        }
+      }
