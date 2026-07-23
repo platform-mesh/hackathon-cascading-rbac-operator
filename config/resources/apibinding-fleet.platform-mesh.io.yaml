@@ -12,10 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Binds the fleet.platform-mesh.io APIExport into a consumer workspace. The
-# export lives in the provider workspace (see config/resources and the README);
-# in the portal this binding is created for you when you install the provider
-# from the marketplace.
+# Self-binding of the fleet.platform-mesh.io APIExport within the provider
+# workspace (root:orgs:e2e:cascade-provider). Two purposes:
+#   1. The APIExportEndpointSlice only publishes its virtual-workspace URL once at
+#      least one APIBinding exists, so this binding gives the operator an endpoint
+#      to connect to even before any consumer has installed the provider.
+#   2. It makes the Cascade type available in the provider workspace itself, so
+#      Cascades can be authored/tested here.
+# Consumer accounts get their own binding by installing the provider from the
+# marketplace; this one is just for the provider workspace.
 apiVersion: apis.kcp.io/v1alpha2
 kind: APIBinding
 metadata:
@@ -23,5 +28,5 @@ metadata:
 spec:
   reference:
     export:
-      path: root:orgs:e2e:cascade-provider
       name: fleet.platform-mesh.io
+      path: root:orgs:e2e:cascade-provider

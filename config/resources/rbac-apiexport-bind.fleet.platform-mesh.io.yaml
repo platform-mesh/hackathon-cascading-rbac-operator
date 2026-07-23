@@ -1,0 +1,49 @@
+# Copyright The Platform Mesh Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Grants permission to bind the fleet.platform-mesh.io APIExport, so it can be
+# installed from the portal marketplace. Without this, binding fails with
+# "no permission to bind to export ...:fleet.platform-mesh.io".
+#
+# Apply this into the SAME workspace that hosts the fleet.platform-mesh.io
+# APIExport. Mirrors the e2e providers' `<name>:apiexport:bind` ClusterRole +
+# ClusterRoleBinding (verb `bind` on the named APIExport, granted to
+# system:authenticated / system:anonymous — the identity the marketplace uses).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fleet.platform-mesh.io:apiexport:bind
+rules:
+  - apiGroups:
+      - apis.kcp.io
+    resources:
+      - apiexports
+    resourceNames:
+      - fleet.platform-mesh.io
+    verbs:
+      - bind
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fleet.platform-mesh.io:apiexport:bind
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fleet.platform-mesh.io:apiexport:bind
+subjects:
+  - kind: User
+    name: system:anonymous
+  - kind: Group
+    name: system:authenticated

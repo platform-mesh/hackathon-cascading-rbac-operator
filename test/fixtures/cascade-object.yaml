@@ -1,0 +1,23 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hackathon-test-role
+rules:
+- apiGroups:
+  - tenancy.kcp.io
+  resources:
+  - '*'
+  verbs:
+  - '*'
+---
+apiVersion: fleet.platform-mesh.io/v1alpha1
+kind: Cascade
+metadata:
+  name: hackathon-test-cascade
+spec:
+  gvk:
+    group: rbac.authorization.k8s.io
+    kind: ClusterRole
+    version: v1
+  maxDepth: 1
+  name: hackathon-test-role
